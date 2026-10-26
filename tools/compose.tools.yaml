@@ -1,0 +1,35 @@
+# Containers that run the project's own tooling. Not part of the Penpot stack.
+# The project name is fixed so these never collide with the real stack ("penpot")
+# or with the disposable smoke stack ("penpot-smoke").
+name: penpot-tools
+
+x-tools-image: &tools-image
+  image: penpot-selfhost-tools:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  # Unit tests. Read-only project mount and NO Docker socket.
+  test:
+    <<: *tools-image
+    volumes:
+      - ..:/work:ro
+    command: ["python3", "-m", "pytest", "tests/unit", "-q"]
+
+  # Helper commands (init, check, mcp-url, ...). Writable mount so `init` can create .env.
+  # NO Docker socket: facts about the Mac's Docker are collected by bin/penpot and passed in.
+  tool:
+    <<: *tools-image
+    volumes:
+      - ..:/work
+    command: ["python3", "-m", "penpot_selfhost.cli"]
+
+  # Smoke test orchestration. The ONLY service with the Docker socket, because it must
+  # create and delete a whole disposable stack (see plan.md, Complexity Tracking).
+  smoke:
+    <<: *tools-image
+    volumes:
+      - ..:/work:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["python3", "-m", "pytest", "tests/smoke", "-q"]

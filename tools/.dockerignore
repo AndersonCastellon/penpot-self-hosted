@@ -1,0 +1,3 @@
+# The build only needs the Dockerfile; keep everything else out of the build context.
+*
+!Dockerfile

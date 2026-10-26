@@ -1,0 +1,111 @@
+# Project-owned changes on top of the official, untouched docker-compose.yaml (Penpot 2.18.4).
+# Docker Compose merges this file automatically. Every value that is a secret or a host setting comes
+# from the git-ignored .env (create it with `bin/penpot init`); never write real secrets in this file.
+#
+# What this file does:
+#   1. Pins all Penpot images to PENPOT_VERSION, so the upstream "${PENPOT_VERSION:-2.18}" fallback never applies.
+#   2. Publishes the two host ports on 127.0.0.1 only. `!override` is required because Compose merges
+#      `ports` lists additively, which would otherwise keep the upstream all-interfaces binding.
+#   3. Adds a health check to every service that has none (the exec form, because the admin console and
+#      the MCP image are hardened images without a shell).
+#   4. Disables Penpot's anonymous telemetry.
+#   5. Replaces the insecure default secrets of the upstream file with the values from .env.
+#   6. Makes PENPOT_PUBLIC_URI follow PENPOT_HTTP_PORT. The browser UI calls the API at this address; upstream
+#      hard-codes http://localhost:9001, so changing the port (or opening another host) would break every request.
+#
+# The checks above are verified by `bin/penpot check` and by the unit tests.
+
+x-project-health-timing: &health-timing
+  # Check often while the service starts so `bin/penpot up` detects "healthy" quickly,
+  # then back off to a relaxed interval.
+  start_period: 90s
+  start_interval: 2s
+  interval: 15s
+  timeout: 5s
+  retries: 6
+
+x-project-public-uri: &public-uri http://localhost:${PENPOT_HTTP_PORT:-9001}
+x-project-secret-key: &secret-key ${PENPOT_SECRET_KEY:?PENPOT_SECRET_KEY must be set in .env (run bin/penpot init)}
+x-project-db-password: &db-password ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (run bin/penpot init)}
+
+services:
+  penpot-frontend:
+    image: penpotapp/frontend:${PENPOT_VERSION:?PENPOT_VERSION must be set in .env (run bin/penpot init)}
+    environment:
+      PENPOT_PUBLIC_URI: *public-uri
+    ports: !override
+      - "127.0.0.1:${PENPOT_HTTP_PORT:-9001}:8080"
+    healthcheck:
+      # The frontend image only has bash: open a TCP connection and read the status line of /readyz,
+      # which nginx proxies to the backend, so "healthy" also means the backend is ready.
+      test:
+        - CMD
+        - bash
+        - -c
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1
+          printf 'GET /readyz HTTP/1.0\r\n\r\n' >&3
+          read -r line <&3
+          [[ "$$line" == *" 200 "* ]]
+      <<: *health-timing
+
+  penpot-backend:
+    image: penpotapp/backend:${PENPOT_VERSION:?PENPOT_VERSION must be set in .env (run bin/penpot init)}
+    environment:
+      PENPOT_PUBLIC_URI: *public-uri
+      PENPOT_TELEMETRY_ENABLED: "false"
+      PENPOT_SECRET_KEY: *secret-key
+      PENPOT_DATABASE_PASSWORD: *db-password
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:6060/readyz"]
+      <<: *health-timing
+
+  penpot-exporter:
+    image: penpotapp/exporter:${PENPOT_VERSION:?PENPOT_VERSION must be set in .env (run bin/penpot init)}
+    environment:
+      PENPOT_PUBLIC_URI: *public-uri
+      PENPOT_SECRET_KEY: *secret-key
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:6061/readyz"]
+      <<: *health-timing
+
+  penpot-admin-console:
+    image: penpotapp/admin-console:${PENPOT_VERSION:?PENPOT_VERSION must be set in .env (run bin/penpot init)}
+    environment:
+      PENPOT_PUBLIC_URI: *public-uri
+      PENPOT_SECRET_KEY: *secret-key
+      PENPOT_DATABASE_PASSWORD: *db-password
+    healthcheck:
+      # No shell and no curl in this image: use Node's http client. Redirects are not followed
+      # (the console redirects to the public URI, which does not resolve inside the container).
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get({host:'127.0.0.1',port:3000,path:'/admin-console/',timeout:3000},r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1)).on('timeout',function(){this.destroy();process.exit(1)})"
+      <<: *health-timing
+
+  penpot-mcp:
+    image: penpotapp/mcp:${PENPOT_VERSION:?PENPOT_VERSION must be set in .env (run bin/penpot init)}
+    healthcheck:
+      # No shell and no curl in this image. A plain GET answers 406 (it wants an event stream),
+      # which proves the server is up; anything below 500 counts as healthy.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get({host:'127.0.0.1',port:4401,path:'/mcp',timeout:3000},r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1)).on('timeout',function(){this.destroy();process.exit(1)})"
+      <<: *health-timing
+
+  penpot-postgres:
+    environment:
+      # Upstream declares these in list form; the map form here is merged by key.
+      POSTGRES_PASSWORD: *db-password
+
+  penpot-mailpit:
+    ports: !override
+      - "127.0.0.1:${PENPOT_MAIL_PORT:-8025}:8025"
+    healthcheck:
+      # Restates the health check built into the image, so it is explicit in the merged configuration.
+      test: ["CMD", "/mailpit", "readyz"]
+      <<: *health-timing
