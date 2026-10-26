@@ -1,0 +1,16 @@
+# Secrets and local configuration (never commit)
+.env
+
+# Claude Code project-scoped MCP config would contain the MCP user token
+.mcp.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Browser automation output (screenshots, snapshots, console logs) may contain session data
+.playwright-mcp/
+
+# macOS
+.DS_Store
