@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Single entry point for the Penpot self-host project. Needs only Docker on the host.
+#
+# This script COLLECTS facts from the Mac's Docker (reachability, volume names, listening ports,
+# `compose ps` snapshots, the error text of `compose up`) and runs the tools containers. Every
+# DECISION is made by the Python package, in pure functions that are unit tested.
+# See specs/001-penpot-selfhost-mcp/research.md, section R11.
+#
+# Written for the Bash 3.2 that ships with macOS: no mapfile, no associative arrays.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${PENPOT_ENV_FILE:-$ROOT/.env}"
+TOOLS_COMPOSE=(docker compose --progress quiet -f "$ROOT/tools/compose.tools.yaml")
+STACK_COMPOSE=(docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yaml" -f "$ROOT/docker-compose.override.yaml")
+
+POLL_SECONDS="${PENPOT_POLL_SECONDS:-3}"
+WARM_LIMIT="${PENPOT_UP_LIMIT:-180}"
+FIRST_START_LIMIT="${PENPOT_UP_LIMIT_FIRST:-300}"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: bin/penpot <command>
+
+Commands:
+  init      create .env with generated secrets
+  check     validate the merged Compose configuration
+  up        start the stack and wait until it is healthy
+  status    show the state of every service
+  down      stop the stack (volumes are kept)
+  mcp-url   print the Claude Code registration command (token masked)
+  test      run the unit tests
+  smoke     run the smoke test on a disposable stack
+EOF
+}
+
+# Exit 2 with the documented message when the Docker daemon cannot be reached.
+require_docker() {
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker is not reachable. Start your Docker runtime (Docker Desktop, OrbStack, ...) and retry." >&2
+    exit 2
+  fi
+}
+
+# Run a helper command in the tools container. No TTY (-T) so stdin can be piped in.
+# The tools container has no Docker socket: it only decides on the facts passed to it.
+run_tool() {
+  "${TOOLS_COMPOSE[@]}" run --rm -T tool python3 -m penpot_selfhost.cli "$@"
+}
+
+# Read KEY from the env file, falling back to a default when the file or the key is missing.
+env_value() {
+  local key="$1" default="$2" value=""
+  if [ -f "$ENV_FILE" ]; then
+    value="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- || true)"
+  fi
+  printf '%s' "${value:-$default}"
+}
+
+cmd_init() {
+  require_docker
+  local volumes
+  volumes="$(docker volume ls --format '{{.Name}}' | paste -sd, -)"
+  run_tool init --volumes "$volumes"
+}
+
+# Collect which programs listen on the stack's host ports and let Python decide (research R11).
+# Docker itself does not report a port held by a program on the Mac, so this check is required.
+check_ports() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  local http_port mail_port listing="" port
+  http_port="$(env_value PENPOT_HTTP_PORT 9001)"
+  mail_port="$(env_value PENPOT_MAIL_PORT 8025)"
+  for port in "$http_port" "$mail_port"; do
+    listing="${listing}### PORT ${port}"$'\n'
+    listing="${listing}$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"$'\n'
+  done
+  run_tool check-ports <<<"$listing" >&2 || exit 1
+}
+
+cmd_up() {
+  require_docker
+  check_ports
+
+  local existing limit up_output
+  existing="$("${STACK_COMPOSE[@]}" ps -aq 2>/dev/null || true)"
+  if [ -z "$existing" ]; then
+    limit="$FIRST_START_LIMIT"
+    echo "First start: Docker will download about 6.7 GB of images, this can take a while." >&2
+  else
+    limit="$WARM_LIMIT"
+  fi
+
+  if ! up_output="$("${STACK_COMPOSE[@]}" up -d 2>&1)"; then
+    run_tool explain-up-error <<<"$up_output" >&2 || true
+    exit 1
+  fi
+
+  local url start elapsed snapshot verdict code
+  # Must be exactly PENPOT_PUBLIC_URI: the browser blocks API calls from any other origin.
+  url="http://localhost:$(env_value PENPOT_HTTP_PORT 9001)"
+  start="$(date +%s)"
+  while :; do
+    elapsed=$(( $(date +%s) - start ))
+    snapshot="$("${STACK_COMPOSE[@]}" ps --format json 2>/dev/null || true)"
+    code=0
+    verdict="$(run_tool health-verdict --elapsed "$elapsed" --limit "$limit" --url "$url" <<<"$snapshot" 2>&1)" || code=$?
+    case "$code" in
+      0) printf '%s\n' "$verdict"; return 0 ;;
+      3) sleep "$POLL_SECONDS" ;;
+      *) printf '%s\n' "$verdict" >&2; exit 1 ;;
+    esac
+  done
+}
+
+cmd_status() {
+  require_docker
+  local snapshot
+  snapshot="$("${STACK_COMPOSE[@]}" ps -a --format json 2>/dev/null || true)"
+  run_tool format-status <<<"$snapshot"
+}
+
+cmd_down() {
+  require_docker
+  # Never pass -v: removing volumes would delete all accounts and designs.
+  "${STACK_COMPOSE[@]}" down
+  echo "stopped (volumes kept)"
+}
+
+# Print the Claude Code registration command. The MCP key is read from PENPOT_MCP_TOKEN or typed
+# (hidden) at a prompt, and reaches the container through the environment only: never as an argument.
+cmd_mcp_url() {
+  require_docker
+  shift
+  if [ -z "${PENPOT_MCP_TOKEN:-}" ]; then
+    read -r -s -p "Paste your Penpot MCP key (input hidden): " PENPOT_MCP_TOKEN
+    echo >&2
+  fi
+  export PENPOT_MCP_TOKEN
+  "${TOOLS_COMPOSE[@]}" run --rm -T -e PENPOT_MCP_TOKEN tool python3 -m penpot_selfhost.cli \
+    mcp-url --port "$(env_value PENPOT_HTTP_PORT 9001)" "$@"
+}
+
+main() {
+  local command="${1:-}"
+  case "$command" in
+    init) cmd_init ;;
+    check)
+      require_docker
+      run_tool check
+      ;;
+    mcp-url) cmd_mcp_url "$@" ;;
+    up) cmd_up ;;
+    status) cmd_status ;;
+    down) cmd_down ;;
+    test)
+      require_docker
+      "${TOOLS_COMPOSE[@]}" run --rm test
+      ;;
+    smoke)
+      # The only command that mounts the Docker socket: it creates and removes a disposable stack.
+      require_docker
+      "${TOOLS_COMPOSE[@]}" run --rm smoke
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
