@@ -1,0 +1,2 @@
+COMMAND   PID       USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+OrbStack  658 anderverse  379u  IPv4 0xe7aaba36c1b490ca      0t0  TCP 127.0.0.1:19990 (LISTEN)
