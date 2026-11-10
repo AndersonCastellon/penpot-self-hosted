@@ -1,0 +1,19 @@
+# penpot.yml: routes of project penpot (edge -> penpot-frontend, nginx on 8080)
+http:
+  routers:
+    penpot-web:
+      rule: "Host(`penpot.andersoncastellon.com`)"
+      entryPoints:
+        - websecure
+      middlewares:
+        - edge-secure-headers
+        - edge-compress
+      service: penpot-web
+      tls:
+        certResolver: le
+        options: default
+  services:
+    penpot-web:
+      loadBalancer:
+        servers:
+          - url: "http://penpot-web:8080"
