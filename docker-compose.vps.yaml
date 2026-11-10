@@ -1,0 +1,43 @@
+# VPS overlay: publishes Penpot through the edge Traefik. Layered after
+# docker-compose.yaml and docker-compose.override.yaml. Upstream files stay untouched.
+#
+# Changes versus the localhost setup:
+#   - PENPOT_PUBLIC_URI is the public HTTPS domain.
+#   - The frontend is reached only by Traefik, through network edge-penpot (alias penpot-web).
+#     It publishes no host port.
+#   - Flags: prepl-server and disable-secure-session-cookies are removed (unsafe on the internet).
+#     MCP and the admin console stay enabled. Registration is handled in the application, not by flags.
+
+x-vps-flags: &vps-flags
+  PENPOT_FLAGS: disable-email-verification enable-smtp enable-mcp enable-admin-console
+
+x-vps-public-uri: &vps-public-uri
+  PENPOT_PUBLIC_URI: https://penpot.andersoncastellon.com
+
+services:
+  penpot-frontend:
+    ports: !reset []
+    networks:
+      penpot: {}
+      edge:
+        aliases:
+          - penpot-web
+    environment:
+      <<: [*vps-flags, *vps-public-uri]
+
+  penpot-backend:
+    environment:
+      <<: [*vps-flags, *vps-public-uri]
+
+  penpot-exporter:
+    environment:
+      <<: [*vps-flags, *vps-public-uri]
+
+  penpot-admin-console:
+    environment:
+      <<: *vps-public-uri
+
+networks:
+  edge:
+    external: true
+    name: edge-penpot
