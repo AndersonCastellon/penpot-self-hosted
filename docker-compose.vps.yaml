@@ -9,7 +9,7 @@
 #     MCP and the admin console stay enabled. Registration is handled in the application, not by flags.
 
 x-vps-flags: &vps-flags
-  PENPOT_FLAGS: disable-email-verification enable-smtp enable-mcp enable-admin-console
+  PENPOT_FLAGS: disable-email-verification disable-registration enable-smtp enable-mcp enable-admin-console
 
 x-vps-public-uri: &vps-public-uri
   PENPOT_PUBLIC_URI: https://penpot.andersoncastellon.com
